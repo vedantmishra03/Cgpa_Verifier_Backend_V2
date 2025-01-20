@@ -240,8 +240,20 @@ def process_file():
         return {"error": "response_sheet must contain 'Rollno' and 'Cgpa' columns."}, 400
 
     try:
-        # Load the master sheet
+        # Load the master sheet--- 1st methode  using excel sheet 
         master_sheet = pd.read_excel(MASTER_SHEET_PATH, index_col=None)  # Added index_col=None
+    
+      #second methode using .csv exported file ---
+        # try:
+        #     master_sheet = pd.read_csv(MASTER_SHEET_PATH, encoding='utf-8')
+        #     logging.debug(f"Successfully loaded master sheet from {MASTER_SHEET_PATH}")
+        # except UnicodeDecodeError as e:
+        #     logging.error(f"Unicode decode error: {str(e)}")
+        #     return {"error": "Failed to decode master data. Please check the file encoding."}, 500
+        # except Exception as csv_error:
+        #     logging.error(f"Failed to load CSV: {str(csv_error)}")
+        #     return {"error": "Failed to load master data"}, 500
+
 
         # Normalize column names in master sheet
         master_sheet.columns = master_sheet.columns.str.strip().str.lower().str.replace(' ', '_')
@@ -342,3 +354,4 @@ def process_file():
     except Exception as e:
         logging.error(f"Processing error: {str(e)}")
         return {"error": f"Error processing the file: {str(e)}"}, 500
+
