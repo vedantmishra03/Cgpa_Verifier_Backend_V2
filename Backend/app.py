@@ -169,8 +169,6 @@
 ##################################################
 ################################################
 
-
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import pandas as pd
@@ -222,7 +220,7 @@ def process_file():
 
     # Load the response sheet
     try:
-        response_sheet = pd.read_excel(response_file, index_col=None)  # Added index_col=None to prevent 'column1'
+        response_sheet = pd.read_excel(response_file, index_col=None)  # Prevent adding an extra index column
     except Exception as e:
         logging.error(f"Excel read error: {str(e)}")
         return {"error": "Invalid file format. Please upload a valid Excel file."}, 400
@@ -240,53 +238,64 @@ def process_file():
         return {"error": "response_sheet must contain 'Rollno' and 'Cgpa' columns."}, 400
 
     try:
-        # Load the master sheet--- 1st methode  using excel sheet 
-        master_sheet = pd.read_excel(MASTER_SHEET_PATH, index_col=None)  # Added index_col=None
+        # Load the master sheet (using Excel file)
+        master_sheet = pd.read_excel(MASTER_SHEET_PATH, index_col=None)
     
-      #second methode using .csv exported file ---
-        # try:
-        #     master_sheet = pd.read_csv(MASTER_SHEET_PATH, encoding='utf-8')
-        #     logging.debug(f"Successfully loaded master sheet from {MASTER_SHEET_PATH}")
-        # except UnicodeDecodeError as e:
-        #     logging.error(f"Unicode decode error: {str(e)}")
-        #     return {"error": "Failed to decode master data. Please check the file encoding."}, 500
-        # except Exception as csv_error:
-        #     logging.error(f"Failed to load CSV: {str(csv_error)}")
-        #     return {"error": "Failed to load master data"}, 500
-
-
         # Normalize column names in master sheet
         master_sheet.columns = master_sheet.columns.str.strip().str.lower().str.replace(' ', '_')
         logging.debug(f"Normalized master sheet columns: {master_sheet.columns.tolist()}")
 
-        # Merge with left join to keep all response entries
-        merged_data = response_sheet.merge(master_sheet, left_on=rollno_column, right_on='rollno', how="left", suffixes=('_response', '_master'))
-        logging.debug(f"Merged data columns: {merged_data.columns.tolist()}")
+        # *** New step: Drop duplicates in the master sheet ***
+        # This ensures that each roll number is unique, avoiding duplicate rows in the merge.
+        master_sheet = master_sheet.drop_duplicates(subset=['rollno'])
+        logging.debug(f"Master sheet after dropping duplicates: {master_sheet.shape}")
 
-        # Check for invalid roll numbers and updated CGPA
+        # --- Preserve original order ---
+        # Add a temporary column to track original row order
+        response_sheet.reset_index(drop=True, inplace=True)
+        response_sheet['orig_index'] = response_sheet.index
+
+        # Merge with left join to keep all response entries (one-to-one join now)
+        merged_data = response_sheet.merge(
+            master_sheet, 
+            left_on=rollno_column, 
+            right_on='rollno', 
+            how="left", 
+            suffixes=('_response', '_master')
+        )
+
+        # Re-sort merged_data using the original order
+        merged_data.sort_values('orig_index', inplace=True)
+        merged_data.reset_index(drop=True, inplace=True)
+
+        # Compute booleans for invalid roll numbers and changed cgpa
         invalid_rolls = merged_data['cgpa_master'].isna()
         changed_cgpa = (merged_data[f"{cgpa_column}_response"] != merged_data['cgpa_master']) & ~invalid_rolls
 
-        # Prepare the output data with correct CGPA
+        # Compute correct_cgpa:
+        # If the master value exists and is different, use the master value; otherwise, use the response value.
         merged_data['correct_cgpa'] = merged_data.apply(
-            lambda row: row['cgpa_master'] if not pd.isna(row['cgpa_master']) and row[f"{cgpa_column}_response"] != row['cgpa_master']
+            lambda row: row['cgpa_master'] if (not pd.isna(row['cgpa_master']) and row[f"{cgpa_column}_response"] != row['cgpa_master'])
             else row[f"{cgpa_column}_response"],
             axis=1
         )
 
-        # Create final dataframe with only required columns
+        # Prepare the output data with only the required columns.
+        # Make a copy of the original response sheet and drop the temporary order column.
         final_data = response_sheet.copy()
+        final_data.drop(columns=['orig_index'], inplace=True)
         
-        # Insert the Correct_Cgpa column next to the original Cgpa column
+        # Insert the correct_cgpa column immediately after the original cgpa column.
         cgpa_idx = list(final_data.columns).index(cgpa_column)
-        final_data.insert(cgpa_idx + 1, 'correct_cgpa', merged_data['correct_cgpa'])
+        # Use .values to ensure we keep the order exactly as in merged_data
+        final_data.insert(cgpa_idx + 1, 'correct_cgpa', merged_data['correct_cgpa'].values)
 
         # Save updated data to an in-memory file
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             final_data.to_excel(writer, index=False, sheet_name='Sheet1')
 
-        # Load and highlight in Excel
+        # Load the workbook to apply cell highlighting
         output.seek(0)
         workbook = load_workbook(output)
         worksheet = workbook.active
@@ -295,41 +304,42 @@ def process_file():
         green_fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")
         red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
 
-        # Get column indices for the final Excel file
+        # Get column indices for the final Excel file (1-indexed)
         columns = list(final_data.columns)
-        rollno_idx = columns.index(rollno_column) + 1
-        cgpa_idx = columns.index(cgpa_column) + 1
-        correct_cgpa_idx = columns.index('correct_cgpa') + 1
+        rollno_idx_excel = columns.index(rollno_column) + 1
+        cgpa_idx_excel = columns.index(cgpa_column) + 1
+        correct_cgpa_idx_excel = columns.index('correct_cgpa') + 1
 
         # Convert column numbers to Excel letters
-        rollno_col = get_column_letter(rollno_idx)
-        cgpa_col = get_column_letter(cgpa_idx)
-        correct_cgpa_col = get_column_letter(correct_cgpa_idx)
+        rollno_col = get_column_letter(rollno_idx_excel)
+        cgpa_col = get_column_letter(cgpa_idx_excel)
+        correct_cgpa_col = get_column_letter(correct_cgpa_idx_excel)
 
         logging.debug(f"Column letters: rollno={rollno_col}, cgpa={cgpa_col}, correct_cgpa={correct_cgpa_col}")
 
-        # Apply highlighting
-        for idx, (_, row) in enumerate(merged_data.iterrows(), start=2):  # Start from 2 to account for header
+        # Apply highlighting row by row.
+        # Note: Excel rows start at 2 because row 1 is the header.
+        for idx, (_, row) in enumerate(merged_data.iterrows(), start=2):
             # Get cell references using column letters
             rollno_cell = worksheet[f"{rollno_col}{idx}"]
             cgpa_response_cell = worksheet[f"{cgpa_col}{idx}"]
             correct_cgpa_cell = worksheet[f"{correct_cgpa_col}{idx}"]
 
-            # Mark invalid roll numbers
-            if invalid_rolls.iloc[idx-2]:
+            # Mark invalid roll numbers (no match in master sheet)
+            if invalid_rolls.iloc[idx - 2]:
                 rollno_cell.fill = red_fill
             
-            # Mark incorrect CGPA values
-            if not invalid_rolls.iloc[idx-2] and changed_cgpa.iloc[idx-2]:
-                cgpa_response_cell.fill = red_fill  # Original incorrect CGPA
-                correct_cgpa_cell.fill = green_fill  # Corrected CGPA value
+            # If roll number is valid but the cgpa from response is different from master, highlight:
+            if not invalid_rolls.iloc[idx - 2] and changed_cgpa.iloc[idx - 2]:
+                cgpa_response_cell.fill = red_fill   # Mark the incorrect cgpa
+                correct_cgpa_cell.fill = green_fill    # Mark the corrected cgpa
 
         # Save to bytes buffer
         output = BytesIO()
         workbook.save(output)
         output_bytes = output.getvalue()
 
-        # Upload bytes directly to Cloudinary with unique filename
+        # Upload bytes directly to Cloudinary with a unique filename
         try:
             timestamp = int(time.time())
             upload_result = cloudinary.uploader.upload(
@@ -354,4 +364,5 @@ def process_file():
     except Exception as e:
         logging.error(f"Processing error: {str(e)}")
         return {"error": f"Error processing the file: {str(e)}"}, 500
+
 
